@@ -27,11 +27,20 @@ import pysam
 
 from dataclasses import dataclass
 
+
+sys.path.append(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+
+
 from sniffles import config
 from sniffles import vcf
 from sniffles import snf
 from sniffles import parallel
 from sniffles import util
+
+
+
 
 #TODO: Dev/Debugging only - Remove for prod
 """
@@ -54,21 +63,29 @@ def Sniffles2_Main(config,processes):
     # Determine Sniffles2 run mode
     #
 
+    ### input 文件的extension，扩展名
     input_ext=[f.split(".")[-1].lower() for f in config.input]
 
+    ### 如果扩展名大于一个，报错，不允许多个格式文件同时指定
     if len(set(input_ext)) > 1:
         util.fatal_error_main(f"Please specify either: A single .bam/.cram file - OR - one or more .snf files - OR - a single .tsv file containing a list of .snf files and optional sample ids as input. (supplied were: {list(set(input_ext))})")
 
+    ### check bam 或者 cram 文件格式
     if "bam" in input_ext or "cram" in input_ext:
+
+        ### 只能指定一个
         if input_ext.count("bam")+input_ext.count("cram") > 1:
             util.fatal_error_main(f"Please specifify max 1 .bam//.cram file as input (got {input_ext.count('bam')})")
         config.input=config.input[0]
 
+        ### 根据genotype_vcf 值确定运行模式是 genotype_vcf还是call_sample
+        ### 这两种模式的输入模式都是bam/cram，但是输出格式不同
         if config.genotype_vcf != None:
             config.mode="genotype_vcf"
         else:
             config.mode="call_sample"
 
+        ### 根据文件扩展名判断打开方式
         config.input_is_cram=False
         if "bam" in input_ext:
             config.input_mode="rb"
@@ -76,17 +93,21 @@ def Sniffles2_Main(config,processes):
             config.input_mode="rc"
             config.input_is_cram=True
 
+    ### 处理snf 或者tsv文件，这里只能是用combine格式
     elif "snf" in input_ext or "tsv" in input_ext:
         config.mode="combine"
     else:
         util.fatal_error_main(f"Failed to determine run mode from input. Please specify either: A single .bam file - OR - one or more .snf files - OR - a single .tsv file containing a list of .snf files and optional sample ids as input. (supplied were: {list(set(input_ext))})")
 
+    ### snf文件必须运行在call_sample模式下
     if config.mode != "call_sample" and config.snf != None:
         util.fatal_error_main(f"--snf cannot be used with run mode {mode}")
 
+    ### snf或者vcf必须有一个不为空
     if config.vcf == None and config.snf == None:
         util.fatal_error_main("Please specify at least one of: --vcf or --snf for output (both may be used at the same time)")
 
+    ### 指定call_sample模式下的sample_id，有默认值
     if config.mode=="call_sample":
         if config.sample_id==None:
             #config.sample_id,_=os.path.splitext(os.path.basename(config.input))
@@ -112,6 +133,7 @@ def Sniffles2_Main(config,processes):
     #
     # call_sample/genotype_vcf: Open .bam file for single calling / .snf creation
     #
+    ### 对于call_sample或者genotype_vcf模式下，打开文件
     contig_tandem_repeats={}
     if config.mode=="call_sample" or config.mode=="genotype_vcf":
         print(f"Opening for reading: {config.input}")
@@ -126,6 +148,7 @@ def Sniffles2_Main(config,processes):
         #
         #Load tandem repeat annotations
         #
+        ### 加载 tandem repeat annotatoins
         if config.tandem_repeats!=None:
             contig_tandem_repeats=util.load_tandem_repeats(config.tandem_repeats,config.tandem_repeat_region_pad)
             print(f"Opening for reading: {config.tandem_repeats} (tandem repeat annotations for {len(contig_tandem_repeats)} contigs)")
@@ -133,6 +156,9 @@ def Sniffles2_Main(config,processes):
     #
     #genotype_vcf: Read SVs from VCF to be genotyped
     #
+    ###? genotyped 是对应的哪种模式？
+    ###  对应的是通过给定一个已有的vcf 在新的样本中genotype这些vcf
+    ###  同样涉及到在新样本中calling sv，所以这个跟call_sample share大量的操作步骤。
     if config.mode=="genotype_vcf":
         path,ext=os.path.splitext(config.genotype_vcf)
         ext=ext.lower()
@@ -150,11 +176,11 @@ def Sniffles2_Main(config,processes):
         genotype_lineindex_svcalls_returned={}
         for svcall in vcf_in.read_svs_iter():
             if not svcall.contig in genotype_contig_svs:
-                genotype_contig_svs[svcall.contig]=[]
+                genotype_contig_svs[svcall.contig]=[] ### 生成一个dict，以contig为key，值是一个list
             assert(not svcall.raw_vcf_line_index in genotype_lineindex_svs)
-            genotype_lineindex_order.append(svcall.raw_vcf_line_index)
-            genotype_lineindex_svs[svcall.raw_vcf_line_index]=svcall
-            genotype_contig_svs[svcall.contig].append(svcall)
+            genotype_lineindex_order.append(svcall.raw_vcf_line_index) ###  记录原来的index order
+            genotype_lineindex_svs[svcall.raw_vcf_line_index]=svcall ### key是line index value 是svcall
+            genotype_contig_svs[svcall.contig].append(svcall) ### 最终把这个call放到对应的contig中处理
         print(f"Opening for reading: {config.genotype_vcf} (read {len(genotype_lineindex_svs)} SVs to be genotyped)")
 
     #
@@ -212,23 +238,31 @@ def Sniffles2_Main(config,processes):
             snf_out=snf.SNFile(config,open(config.snf,"wb"))
             snf_parts=[]
 
+    ### 至此，所有config配置完成，下边根据不同的mode来并行化执行
+    print(config)
+
     #
     # Plan multiprocessing tasks
     #
     task_id=0
     tasks_list=[]
     contig_tasks_intervals={}
-
+    ### 处理 mode = call_sample的形式，或者genotype的形式
     if config.mode=="call_sample" or config.mode=="genotype_vcf":
         #
         # Process .bam header
         #
+        ### 获得total_mapped reads 来进行并行
+        ### 这里的并行是根据线程predefine哪些reads需要在哪个taskid中执行的
         total_mapped=bam_in.mapped
+        ### 如果thread = 1 那么每个task的read 就是所有的reads，否则，平均分配
         if (config.threads==1 and not config.low_memory) or config.task_count_multiplier==0:
             task_max_reads=total_mapped
         else:
             task_max_reads=max(1,math.floor(total_mapped/(config.threads*config.task_count_multiplier)))
 
+        ### 事前确定好 offset的reads数量，便于后续并行化
+        ### 这里如果reads过少，则一个线程全部处理了，限定了每个线程固定的reads处理数量
         if total_mapped==0:
             #Total mapped returns 0 for CRAM files
             config.task_read_id_offset_mult=10**9
@@ -240,20 +274,25 @@ def Sniffles2_Main(config,processes):
         contig_coverages={}
         contigs_with_tr_annotations=0
         for contig in bam_in.get_index_statistics():
+            ### get_index_statistics 返回的是：IndexStats(contig="1",mapped=11111,unmapped=12222,total=11111)
             if task_max_reads==0:
-                task_count=1
+                task_count=1 ### 计算task的数量
             else:
                 task_count=max(1,math.ceil(contig.mapped / float(task_max_reads)))
             contig_str=str(contig.contig)
-            contig_length=bam_in.get_reference_length(contig_str)
+            ### get_reference_length() returns return reference length corresponding to numerical tid
+            contig_length=bam_in.get_reference_length(contig_str) 
             contig_lengths.append((contig_str, contig_length))
             contig_coverages[contig_str]=[]
-            task_length=math.floor(contig_length/float(task_count))
+            ### estimate how long will be processed by each task 
+            task_length=math.floor(contig_length/float(task_count)) 
             contigs_with_tr_annotations+=int(contig_str in contig_tandem_repeats)
             startpos=0
 
             while startpos < contig_length-1:
-                endpos=min(contig_length-1,startpos+task_length)
+                ### 获得每个task要处理的区间，这里果然转化为contig region，而不是bam中的reads数量均分，避免了一个SV在不同的task中处理导致的异常，very smart!
+                endpos=min(contig_length-1,startpos+task_length)  
+                ### 下边这段代码为了适配genotyped模式，genotype_svs 指定存储
                 if config.genotype_vcf!=None:
                     if contig_str in genotype_contig_svs:
                         genotype_svs=[target_sv for target_sv in genotype_contig_svs[contig_str] if target_sv.pos >= startpos and target_sv.pos < endpos]
@@ -261,7 +300,7 @@ def Sniffles2_Main(config,processes):
                         genotype_svs=[]
                 else:
                     genotype_svs=None
-
+                ### parallel.Task 是一个dataclass
                 task=parallel.Task(id=task_id,
                                    contig=contig_str,
                                    start=startpos,
@@ -274,7 +313,10 @@ def Sniffles2_Main(config,processes):
                 if not contig_str in contig_tasks_intervals:
                     contig_tasks_intervals[contig_str]=[]
                 contig_tasks_intervals[contig_str].append((task.start,task.end,task))
+                ### reassign startpos
                 startpos+=task_length
+
+                ### taskid自增1
                 task_id+=1
         config.contig_lengths=contig_lengths
 
@@ -284,6 +326,7 @@ def Sniffles2_Main(config,processes):
             if contigs_with_tr_annotations==0:
                 util.fatal_error_main("A tandem repeat annotations file was provided, but no matching annotations were found for any contig in the sample input file. Please check if the contig naming scheme in the tandem repeat annotations matches with the one in the input sample file.")
 
+    ### 处理 mode = combine的形式
     elif config.mode=="combine":
         #
         # Process .snf headers
@@ -294,6 +337,7 @@ def Sniffles2_Main(config,processes):
 
         input_snfs_sample_ids=[]
 
+        ### 如果是tsv格式提供的snf文件列表，则读入tsv文件
         if len(config.input)==1 and input_ext[0]=="tsv":
             print(f"Opening for reading: {config.input[0]} (loading list of .snf files and associated sample ids)")
             with open(config.input[0],"r") as tsv_handle:
@@ -316,6 +360,7 @@ def Sniffles2_Main(config,processes):
         else:
             util.fatal_error_main("Failed to determine .snf files to be combined. Please specify either one or more .snf files OR a single .tsv file as input for multi-calling.")
 
+        ### 循环读取snf文件格式
         for input_filename, sample_id in input_snfs_sample_ids:
             snf_in=snf.SNFile(config,open(input_filename,"rb"),filename=input_filename)
             snf_in.read_header()
@@ -342,6 +387,7 @@ def Sniffles2_Main(config,processes):
         #TODO: Assure header consistency across multiple .snfs
 
         for contig_str,contig_length in contig_lengths:
+            ### parallel.Task 是个dataclass 这里是对其进行了初始化
             task=parallel.Task(id=task_id,contig=contig_str,start=0,end=contig_length-1,assigned_process_id=None,sv_id=0)
             tasks_list.append(task)
             if not contig_str in contig_tasks_intervals:
@@ -354,14 +400,24 @@ def Sniffles2_Main(config,processes):
         for info in config.snf_input_info:
             print(f"    {info['filename']} (sample ID in output VCF='{info['sample_id']}')")
 
+    ### 处理 mode = genotype_vcf的额外形式
     if config.mode!="genotype_vcf" and config.vcf != None:
         vcf_out.write_header(contig_lengths)
 
     #
     # Start workers
     #
+    ### 进程池是主入口的函数接收的，享有全局生命周期，所以在if __name__ == __main__ 中可以手动退出。
+
     for proc in range(config.threads):
+        ### 创建线程池
         pipe_main,pipe_proc=multiprocessing.Pipe()
+
+        ### parallel.Process 同样是一个自定义的dataclass
+        ### parallel.Main 要并行的执行函数
+        ### parallel.Main 的参数有3个分别是 args=(proc,config,pipe_proc)   proc 是进程ID, config是对应的配置，pipe_proc是从Pipe出来的变啊零
+        ### 给每个进程都创建一个Pipe的sender和receiver,分别是pipe_main和pipe_proce,
+        ### 后续通过pipe_main发送数据给进程执行
         proc=parallel.Process(id=proc,process=multiprocessing.Process(target=parallel.Main,args=(proc,config,pipe_proc)),pipe_main=pipe_main,externals=[])
         processes.append(proc)
 
@@ -428,14 +484,14 @@ def Sniffles2_Main(config,processes):
         while len(processes_free) > 0 and len(tasks_todo) > 0:
             seed=(seed*1103515245+12345)%(2**31)
             if config.low_memory:
-                task=tasks_todo.pop(seed%len(tasks_todo))
+                task=tasks_todo.pop(seed%len(tasks_todo)) ## 从todo中取出task 下边send到Pipe中
             else:
                 task=tasks_todo.pop()
             proc=processes_free.pop()
             processes_busy.append(proc)
             assert(task.assigned_process_id==None)
             task.assigned_process_id=proc.id
-            proc.pipe_main.send([config.mode,task])
+            proc.pipe_main.send([config.mode,task]) ### 这里是Pipe 的send方法, 在parallel 的main_internal中判断config.mode类型
 
         if total_mapped > 0:
             #Progress disabled for CRAM files due to total read count not being stored in index
@@ -613,6 +669,10 @@ if __name__ == "__main__":
     processes=[]
 
     try:
+        
+        ### 程序主入口，config 模块下的from_cmdline()函数处理外部参数
+        ### 返回的是一个parse_args()函数的返回值添加了初始化的参数
+        ### processes 是一个进程池
         Sniffles2_Main(config.from_cmdline(),processes)
     except util.Sniffles2Exit:
         if len(processes):

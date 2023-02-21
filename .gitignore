@@ -1,3 +1,7 @@
 .DS_Store
 src/sniffles.egg-info
 dist
+/.vscode/
+src/sniffles/__pycache__/
+src/sniffles/test/
+src/sniffles/test*

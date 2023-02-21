@@ -21,6 +21,9 @@ from sniffles import postprocessing
 from sniffles import snf
 from sniffles import util
 
+
+### 具体处理call_sample genptyped 和 combine的逻辑代码
+### 大部分内容都进一步被封装到对应的类中
 @dataclass
 class Task:
     id: int
@@ -38,7 +41,8 @@ class Task:
         assert(self.lead_provider==None)
 
         self.bam=pysam.AlignmentFile(config.input, config.input_mode, require_index=True)
-        self.lead_provider=leadprov.LeadProvider(config,self.id*config.task_read_id_offset_mult)
+        ### task_read_id_offset_mult 提前设定了ID和Offset， 这样可以提前知道自己要处理哪些reads
+        self.lead_provider=leadprov.LeadProvider(config,self.id*config.task_read_id_offset_mult) 
         externals=self.lead_provider.build_leadtab(self.contig,self.start,self.end,self.bam)
         return externals,self.lead_provider.read_count
 
@@ -208,7 +212,7 @@ def Main_Internal(proc_id,config,pipe):
                 qc=False
             else:
                 qc=True
-
+            ### task 是 Task dataclass 定义的方法
             _,read_count=task.build_leadtab(config)
             svcandidates=task.call_candidates(qc,config)
             svcalls=task.finalize_candidates(svcandidates,not qc,config)

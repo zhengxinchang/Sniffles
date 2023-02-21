@@ -516,18 +516,26 @@ class LeadProvider:
         for read in bam.fetch(contig,start,end,until_eof=False):
             #if self.read_count % 1000000 == 0:
             #    gc.collect()
+            ### fetch的时候并不是精准的fetch start和end 而是会把与相关区域有overlap的reads都fetch回来
+            ### 下边这个保证了获得的reads是的start是严格在fetch的区间的
             if read.reference_start < start or read.reference_start >= end:
                 continue
+            ###  --|start                  End|---
+            ###   ********* discard
+            ###                                 ******** discard
+            ###      *******  retained 
+            ###                           ********** retained
 
             self.read_id+=1
             self.read_count+=1
 
+            ### 应用read filter
             alen=read.query_alignment_length
             if read.mapping_quality < mapq_min or read.is_secondary or alen < alen_min:
                 continue
 
             has_sa=read.has_tag("SA")
-            use_clips=self.config.detect_large_ins and not read.is_supplementary and not has_sa
+            use_clips=self.config.detect_large_ins and (not read.is_supplementary) and (not has_sa)
 
             nm=-1
             curr_read_id=self.read_id
